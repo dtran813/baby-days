@@ -30,6 +30,8 @@ import {
 import {
   LineChart,
   Line,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -120,22 +122,61 @@ function mlToOz(ml) {
 
 function fmtWeight(lb, oz, units) {
   if (lb == null && oz == null) return null;
-  if (units === "metric") return `${lbOzToKg(lb, oz).toFixed(2)} kg`;
-  return `${lb || 0} lb ${oz || 0} oz`;
+  const imperial = `${lb || 0} lb ${oz || 0} oz`;
+  const metric = `${lbOzToKg(lb, oz).toFixed(2)} kg`;
+  if (units === "metric") return metric;
+  if (units === "both") return `${imperial} (${metric})`;
+  return imperial;
 }
 function fmtLength(inches, units, label) {
   if (inches == null) return null;
-  if (units === "metric")
-    return `${inToCm(inches).toFixed(1)} cm${label ? " " + label : ""}`;
-  return `${inches} in${label ? " " + label : ""}`;
+  const imperial = `${inches} in`;
+  const metric = `${inToCm(inches).toFixed(1)} cm`;
+  const suffix = label ? " " + label : "";
+  if (units === "metric") return metric + suffix;
+  if (units === "both") return `${imperial} (${metric})${suffix}`;
+  return imperial + suffix;
 }
 function fmtVolume(oz, units) {
   if (oz == null) return null;
-  if (units === "metric") return `${Math.round(ozToMl(oz))} ml`;
-  return `${oz} oz`;
+  const imperial = `${oz} oz`;
+  const metric = `${Math.round(ozToMl(oz))} ml`;
+  if (units === "metric") return metric;
+  if (units === "both") return `${imperial} (${metric})`;
+  return imperial;
 }
-function volumeUnitLabel(units) {
-  return units === "metric" ? "ml" : "oz";
+// Keeps two unit representations of the same value in sync: typing in
+// either field updates the other, but only the field NOT being typed in
+// gets reformatted, so the active field's cursor never jumps.
+function useDualUnit(
+  initialPrimary,
+  toSecondary,
+  fromSecondary,
+  roundPrimary,
+  roundSecondary,
+) {
+  const fmt = (n, round) => (Number.isFinite(n) ? String(round(n)) : "");
+  const [primary, setPrimary] = useState(
+    initialPrimary != null ? String(initialPrimary) : "",
+  );
+  const [secondary, setSecondary] = useState(
+    initialPrimary != null
+      ? fmt(toSecondary(Number(initialPrimary)), roundSecondary)
+      : "",
+  );
+
+  const onPrimaryChange = (v) => {
+    setPrimary(v);
+    const n = parseFloat(v);
+    setSecondary(Number.isFinite(n) ? fmt(toSecondary(n), roundSecondary) : "");
+  };
+  const onSecondaryChange = (v) => {
+    setSecondary(v);
+    const n = parseFloat(v);
+    setPrimary(Number.isFinite(n) ? fmt(fromSecondary(n), roundPrimary) : "");
+  };
+
+  return { primary, secondary, onPrimaryChange, onSecondaryChange };
 }
 
 const FONTS = (
@@ -454,7 +495,14 @@ function minutesToAngle(mins) {
   return (mins / 1440) * 360;
 }
 
-function DayRing({ selectedDate, events, now, activeTimer }) {
+function DayRing({
+  selectedDate,
+  events,
+  now,
+  activeTimer,
+  onDotTap,
+  selectedEventId,
+}) {
   const { start, end } = dayBounds(selectedDate);
   const cx = 120,
     cy = 116,
@@ -464,7 +512,6 @@ function DayRing({ selectedDate, events, now, activeTimer }) {
   const sleeps = [];
   const feeds = [];
   const diapers = [];
-  const pumps = [];
   let totalSleepMs = 0;
 
   events.forEach((ev) => {
@@ -484,15 +531,15 @@ function DayRing({ selectedDate, events, now, activeTimer }) {
     } else if (ev.type === "feed") {
       const t = new Date(ev.timestamp);
       if (t >= start && t < end)
-        feeds.push(minutesToAngle((t - start) / 60000));
+        feeds.push({ a: minutesToAngle((t - start) / 60000), ev });
     } else if (ev.type === "diaper") {
       const t = new Date(ev.timestamp);
       if (t >= start && t < end)
-        diapers.push({ a: minutesToAngle((t - start) / 60000), kind: ev.kind });
-    } else if (ev.type === "pump") {
-      const t = new Date(ev.timestamp);
-      if (t >= start && t < end)
-        pumps.push(minutesToAngle((t - start) / 60000));
+        diapers.push({
+          a: minutesToAngle((t - start) / 60000),
+          kind: ev.kind,
+          ev,
+        });
     }
   });
 
@@ -511,6 +558,35 @@ function DayRing({ selectedDate, events, now, activeTimer }) {
   const nowAngle = isToday ? minutesToAngle((now - start) / 60000) : null;
   const ticks = [0, 3, 6, 9, 12, 15, 18, 21];
   const tickLabel = { 0: "12A", 6: "6A", 12: "12P", 18: "6P" };
+
+  const RingDot = ({ x, y, r, fill, ev }) => (
+    <g
+      onClick={() => onDotTap && onDotTap(ev)}
+      style={{ cursor: onDotTap ? "pointer" : "default" }}
+    >
+      {/* invisible larger hit target for easier tapping */}
+      <circle cx={x} cy={y} r={12} fill="transparent" />
+      {selectedEventId === ev.id && (
+        <circle
+          cx={x}
+          cy={y}
+          r={r + 4}
+          fill="none"
+          stroke={fill}
+          strokeWidth={1.5}
+          opacity={0.5}
+        />
+      )}
+      <circle
+        cx={x}
+        cy={y}
+        r={r}
+        fill={fill}
+        stroke={C.surface}
+        strokeWidth={1.5}
+      />
+    </g>
+  );
 
   return (
     <svg viewBox="0 0 240 240" className="w-full h-auto">
@@ -564,45 +640,22 @@ function DayRing({ selectedDate, events, now, activeTimer }) {
           </g>
         );
       })}
-      {feeds.map((a, i) => {
-        const [x, y] = polar(cx, cy, R + 20, a);
+      {feeds.map((d, i) => {
+        const [x, y] = polar(cx, cy, R + 20, d.a);
         return (
-          <circle
-            key={"f" + i}
-            cx={x}
-            cy={y}
-            r={5}
-            fill={C.feed}
-            stroke={C.surface}
-            strokeWidth={1.5}
-          />
+          <RingDot key={"f" + i} x={x} y={y} r={5} fill={C.feed} ev={d.ev} />
         );
       })}
       {diapers.map((d, i) => {
         const [x, y] = polar(cx, cy, R - 20, d.a);
         return (
-          <circle
+          <RingDot
             key={"d" + i}
-            cx={x}
-            cy={y}
+            x={x}
+            y={y}
             r={5}
             fill={diaperColor(d.kind).color}
-            stroke={C.surface}
-            strokeWidth={1.5}
-          />
-        );
-      })}
-      {pumps.map((a, i) => {
-        const [x, y] = polar(cx, cy, R + 34, a);
-        return (
-          <circle
-            key={"p" + i}
-            cx={x}
-            cy={y}
-            r={4}
-            fill={C.pump}
-            stroke={C.surface}
-            strokeWidth={1.5}
+            ev={d.ev}
           />
         );
       })}
@@ -781,24 +834,23 @@ function FeedModal({
   const [minutes, setMinutes] = useState(
     editing?.durationMs ? Math.round(editing.durationMs / 60000) : 10,
   );
-  const initialAmount =
-    editing?.amount != null
-      ? units === "metric"
-        ? Math.round(ozToMl(editing.amount))
-        : editing.amount
-      : units === "metric"
-        ? 120
-        : 4;
-  const [amount, setAmount] = useState(initialAmount);
+  const vol = useDualUnit(
+    editing?.amount ?? 4,
+    ozToMl,
+    mlToOz,
+    (n) => Math.round(n * 100) / 100,
+    (n) => Math.round(n),
+  );
   const [food, setFood] = useState(editing?.food || "");
   const [when, setWhen] = useState(
     toInputDateTime(editing ? new Date(editing.timestamp) : new Date()),
   );
   const [note, setNote] = useState(editing?.note || "");
-  const unitLabel = volumeUnitLabel(units);
 
-  const canonicalAmount = () =>
-    units === "metric" ? mlToOz(Number(amount)) : Number(amount);
+  const canonicalAmount = () => {
+    const n = parseFloat(vol.primary);
+    return Number.isFinite(n) ? n : 0;
+  };
 
   const save = () => {
     const timestamp = new Date(when).toISOString();
@@ -900,14 +952,57 @@ function FeedModal({
       )}
 
       {(method === "bottle" || method === "combo") && (
-        <Field label={`Amount (${unitLabel})`}>
-          <TextInput
-            type="number"
-            min="0"
-            step={units === "metric" ? 5 : 0.5}
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-          />
+        <Field label="Amount">
+          {units === "both" ? (
+            <div className="flex gap-3">
+              <div className="flex-1">
+                <p
+                  className="text-xs mb-1"
+                  style={{ color: C.inkFaint, fontWeight: 600 }}
+                >
+                  oz
+                </p>
+                <TextInput
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={vol.primary}
+                  onChange={(e) => vol.onPrimaryChange(e.target.value)}
+                />
+              </div>
+              <div className="flex-1">
+                <p
+                  className="text-xs mb-1"
+                  style={{ color: C.inkFaint, fontWeight: 600 }}
+                >
+                  ml
+                </p>
+                <TextInput
+                  type="number"
+                  min="0"
+                  step="5"
+                  value={vol.secondary}
+                  onChange={(e) => vol.onSecondaryChange(e.target.value)}
+                />
+              </div>
+            </div>
+          ) : units === "metric" ? (
+            <TextInput
+              type="number"
+              min="0"
+              step="5"
+              value={vol.secondary}
+              onChange={(e) => vol.onSecondaryChange(e.target.value)}
+            />
+          ) : (
+            <TextInput
+              type="number"
+              min="0"
+              step="0.5"
+              value={vol.primary}
+              onChange={(e) => vol.onPrimaryChange(e.target.value)}
+            />
+          )}
         </Field>
       )}
 
@@ -1081,30 +1176,26 @@ function DiaperModal({ onClose, onSave, editing }) {
 
 function PumpModal({ onClose, onSave, editing, units = "imperial" }) {
   const [side, setSide] = useState(editing?.side || "both");
-  const initialAmount =
-    editing?.amount != null
-      ? units === "metric"
-        ? Math.round(ozToMl(editing.amount))
-        : editing.amount
-      : units === "metric"
-        ? 90
-        : 3;
-  const [amount, setAmount] = useState(initialAmount);
+  const vol = useDualUnit(
+    editing?.amount ?? 3,
+    ozToMl,
+    mlToOz,
+    (n) => Math.round(n * 100) / 100,
+    (n) => Math.round(n),
+  );
   const [when, setWhen] = useState(
     toInputDateTime(editing ? new Date(editing.timestamp) : new Date()),
   );
   const [note, setNote] = useState(editing?.note || "");
-  const unitLabel = volumeUnitLabel(units);
 
   const save = () => {
-    const canonicalAmount =
-      units === "metric" ? mlToOz(Number(amount)) : Number(amount);
+    const n = parseFloat(vol.primary);
     onSave({
       id: editing?.id || uid(),
       type: "pump",
       timestamp: new Date(when).toISOString(),
       side,
-      amount: canonicalAmount,
+      amount: Number.isFinite(n) ? n : 0,
       note: note.trim(),
     });
   };
@@ -1127,14 +1218,57 @@ function PumpModal({ onClose, onSave, editing, units = "imperial" }) {
           colorMap={{ left: C.pump, right: C.pump, both: C.pump }}
         />
       </Field>
-      <Field label={`Amount (${unitLabel})`}>
-        <TextInput
-          type="number"
-          min="0"
-          step={units === "metric" ? 5 : 0.5}
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-        />
+      <Field label="Amount">
+        {units === "both" ? (
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <p
+                className="text-xs mb-1"
+                style={{ color: C.inkFaint, fontWeight: 600 }}
+              >
+                oz
+              </p>
+              <TextInput
+                type="number"
+                min="0"
+                step="0.5"
+                value={vol.primary}
+                onChange={(e) => vol.onPrimaryChange(e.target.value)}
+              />
+            </div>
+            <div className="flex-1">
+              <p
+                className="text-xs mb-1"
+                style={{ color: C.inkFaint, fontWeight: 600 }}
+              >
+                ml
+              </p>
+              <TextInput
+                type="number"
+                min="0"
+                step="5"
+                value={vol.secondary}
+                onChange={(e) => vol.onSecondaryChange(e.target.value)}
+              />
+            </div>
+          </div>
+        ) : units === "metric" ? (
+          <TextInput
+            type="number"
+            min="0"
+            step="5"
+            value={vol.secondary}
+            onChange={(e) => vol.onSecondaryChange(e.target.value)}
+          />
+        ) : (
+          <TextInput
+            type="number"
+            min="0"
+            step="0.5"
+            value={vol.primary}
+            onChange={(e) => vol.onPrimaryChange(e.target.value)}
+          />
+        )}
       </Field>
       <Field label="Time">
         <TextInput
@@ -1334,62 +1468,99 @@ function GrowthModal({ onClose, onSave, editing, units = "imperial" }) {
   const [when, setWhen] = useState(
     (editing ? new Date(editing.date) : new Date()).toISOString().slice(0, 10),
   );
-  const isMetric = units === "metric";
 
-  // Imperial-mode state (canonical units)
-  const [lb, setLb] = useState(editing?.weightLb ?? "");
-  const [oz, setOz] = useState(editing?.weightOz ?? "");
-  const [heightIn, setHeightIn] = useState(editing?.heightIn ?? "");
-  const [headIn, setHeadIn] = useState(editing?.headIn ?? "");
+  // Canonical (always the source of truth for saving)
+  const [lb, setLb] = useState(
+    editing?.weightLb != null ? String(editing.weightLb) : "",
+  );
+  const [oz, setOz] = useState(
+    editing?.weightOz != null ? String(editing.weightOz) : "",
+  );
+  const [heightIn, setHeightIn] = useState(
+    editing?.heightIn != null ? String(editing.heightIn) : "",
+  );
+  const [headIn, setHeadIn] = useState(
+    editing?.headIn != null ? String(editing.headIn) : "",
+  );
 
-  // Metric-mode state (display units, converted to/from canonical on save/load)
+  // Metric companions, kept in sync with the canonical fields above
   const [kg, setKg] = useState(
     editing && (editing.weightLb != null || editing.weightOz != null)
-      ? Number(lbOzToKg(editing.weightLb, editing.weightOz).toFixed(2))
+      ? lbOzToKg(editing.weightLb, editing.weightOz).toFixed(2)
       : "",
   );
   const [heightCm, setHeightCm] = useState(
-    editing?.heightIn != null
-      ? Number(inToCm(editing.heightIn).toFixed(1))
-      : "",
+    editing?.heightIn != null ? inToCm(editing.heightIn).toFixed(1) : "",
   );
   const [headCm, setHeadCm] = useState(
-    editing?.headIn != null ? Number(inToCm(editing.headIn).toFixed(1)) : "",
+    editing?.headIn != null ? inToCm(editing.headIn).toFixed(1) : "",
   );
 
   const [note, setNote] = useState(editing?.note || "");
 
-  const save = () => {
-    let weightLb, weightOz, heightInVal, headInVal;
-    if (isMetric) {
-      if (kg !== "") {
-        const conv = kgToLbOz(Number(kg));
-        weightLb = conv.lb;
-        weightOz = conv.oz;
-      } else {
-        weightLb = null;
-        weightOz = null;
-      }
-      heightInVal =
-        heightCm === "" ? null : Number(cmToIn(Number(heightCm)).toFixed(2));
-      headInVal =
-        headCm === "" ? null : Number(cmToIn(Number(headCm)).toFixed(2));
-    } else {
-      weightLb = lb === "" ? null : Number(lb);
-      weightOz = oz === "" ? null : Number(oz);
-      heightInVal = heightIn === "" ? null : Number(heightIn);
-      headInVal = headIn === "" ? null : Number(headIn);
+  const syncKgFrom = (lbVal, ozVal) => {
+    if (lbVal === "" && ozVal === "") return "";
+    return lbOzToKg(parseFloat(lbVal) || 0, parseFloat(ozVal) || 0).toFixed(2);
+  };
+  const onLbChange = (v) => {
+    setLb(v);
+    setKg(syncKgFrom(v, oz));
+  };
+  const onOzChange = (v) => {
+    setOz(v);
+    setKg(syncKgFrom(lb, v));
+  };
+  const onKgChange = (v) => {
+    setKg(v);
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) {
+      setLb("");
+      setOz("");
+      return;
     }
+    const conv = kgToLbOz(n);
+    setLb(String(conv.lb));
+    setOz(String(conv.oz));
+  };
+
+  const onHeightInChange = (v) => {
+    setHeightIn(v);
+    const n = parseFloat(v);
+    setHeightCm(Number.isFinite(n) ? inToCm(n).toFixed(1) : "");
+  };
+  const onHeightCmChange = (v) => {
+    setHeightCm(v);
+    const n = parseFloat(v);
+    setHeightIn(Number.isFinite(n) ? cmToIn(n).toFixed(2) : "");
+  };
+  const onHeadInChange = (v) => {
+    setHeadIn(v);
+    const n = parseFloat(v);
+    setHeadCm(Number.isFinite(n) ? inToCm(n).toFixed(1) : "");
+  };
+  const onHeadCmChange = (v) => {
+    setHeadCm(v);
+    const n = parseFloat(v);
+    setHeadIn(Number.isFinite(n) ? cmToIn(n).toFixed(2) : "");
+  };
+
+  const save = () => {
     onSave({
       id: editing?.id || uid(),
       date: new Date(when + "T12:00").toISOString(),
-      weightLb,
-      weightOz,
-      heightIn: heightInVal,
-      headIn: headInVal,
+      weightLb: lb === "" ? null : Number(lb),
+      weightOz: oz === "" ? null : Number(oz),
+      heightIn: heightIn === "" ? null : Number(heightIn),
+      headIn: headIn === "" ? null : Number(headIn),
       note: note.trim(),
     });
   };
+
+  const smallLabel = (text) => (
+    <p className="text-xs mb-1" style={{ color: C.inkFaint, fontWeight: 600 }}>
+      {text}
+    </p>
+  );
 
   return (
     <Sheet
@@ -1405,88 +1576,108 @@ function GrowthModal({ onClose, onSave, editing, units = "imperial" }) {
         />
       </Field>
 
-      {isMetric ? (
-        <>
-          <Field label="Weight (kg)">
+      <Field label="Weight">
+        {(units === "imperial" || units === "both") && (
+          <div className="flex gap-3 mb-2">
+            <div className="flex-1">
+              {smallLabel("lb")}
+              <TextInput
+                type="number"
+                min="0"
+                value={lb}
+                onChange={(e) => onLbChange(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+            <div className="flex-1">
+              {smallLabel("oz")}
+              <TextInput
+                type="number"
+                min="0"
+                max="15"
+                value={oz}
+                onChange={(e) => onOzChange(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+          </div>
+        )}
+        {(units === "metric" || units === "both") && (
+          <div className={units === "both" ? "w-1/2 pr-1.5" : ""}>
+            {smallLabel("kg")}
             <TextInput
               type="number"
               min="0"
               step="0.01"
               value={kg}
-              onChange={(e) => setKg(e.target.value)}
+              onChange={(e) => onKgChange(e.target.value)}
               placeholder="0"
             />
-          </Field>
-          <Field label="Height (cm)">
-            <TextInput
-              type="number"
-              min="0"
-              step="0.1"
-              value={heightCm}
-              onChange={(e) => setHeightCm(e.target.value)}
-              placeholder="0"
-            />
-          </Field>
-          <Field label="Head circumference (cm)">
-            <TextInput
-              type="number"
-              min="0"
-              step="0.1"
-              value={headCm}
-              onChange={(e) => setHeadCm(e.target.value)}
-              placeholder="0"
-            />
-          </Field>
-        </>
-      ) : (
-        <>
-          <div className="flex gap-3">
-            <div className="flex-1">
-              <Field label="Weight (lb)">
-                <TextInput
-                  type="number"
-                  min="0"
-                  value={lb}
-                  onChange={(e) => setLb(e.target.value)}
-                  placeholder="0"
-                />
-              </Field>
-            </div>
-            <div className="flex-1">
-              <Field label="Weight (oz)">
-                <TextInput
-                  type="number"
-                  min="0"
-                  max="15"
-                  value={oz}
-                  onChange={(e) => setOz(e.target.value)}
-                  placeholder="0"
-                />
-              </Field>
-            </div>
           </div>
-          <Field label="Height (in)">
-            <TextInput
-              type="number"
-              min="0"
-              step="0.1"
-              value={heightIn}
-              onChange={(e) => setHeightIn(e.target.value)}
-              placeholder="0"
-            />
-          </Field>
-          <Field label="Head circumference (in)">
-            <TextInput
-              type="number"
-              min="0"
-              step="0.1"
-              value={headIn}
-              onChange={(e) => setHeadIn(e.target.value)}
-              placeholder="0"
-            />
-          </Field>
-        </>
-      )}
+        )}
+      </Field>
+
+      <Field label="Height">
+        <div className="flex gap-3">
+          {(units === "imperial" || units === "both") && (
+            <div className="flex-1">
+              {smallLabel("in")}
+              <TextInput
+                type="number"
+                min="0"
+                step="0.1"
+                value={heightIn}
+                onChange={(e) => onHeightInChange(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+          )}
+          {(units === "metric" || units === "both") && (
+            <div className="flex-1">
+              {smallLabel("cm")}
+              <TextInput
+                type="number"
+                min="0"
+                step="0.1"
+                value={heightCm}
+                onChange={(e) => onHeightCmChange(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+          )}
+        </div>
+      </Field>
+
+      <Field label="Head circumference">
+        <div className="flex gap-3">
+          {(units === "imperial" || units === "both") && (
+            <div className="flex-1">
+              {smallLabel("in")}
+              <TextInput
+                type="number"
+                min="0"
+                step="0.1"
+                value={headIn}
+                onChange={(e) => onHeadInChange(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+          )}
+          {(units === "metric" || units === "both") && (
+            <div className="flex-1">
+              {smallLabel("cm")}
+              <TextInput
+                type="number"
+                min="0"
+                step="0.1"
+                value={headCm}
+                onChange={(e) => onHeadCmChange(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+          )}
+        </div>
+      </Field>
 
       <Field label="Note (optional)">
         <TextInput
@@ -1502,9 +1693,25 @@ function GrowthModal({ onClose, onSave, editing, units = "imperial" }) {
   );
 }
 
+// Birth date/time is stored as a plain local wall-clock string (no
+// timezone conversion) — same as Onboarding writes it — so it always
+// round-trips exactly as entered. This also gracefully repairs any value
+// that was previously saved with an incorrect UTC conversion.
+function birthDateToInputValue(raw) {
+  if (!raw) return "";
+  if (/Z$|[+-]\d{2}:\d{2}$/.test(raw)) {
+    // Looks like a real UTC/offset instant (from the old buggy save) —
+    // convert it back to this browser's local wall-clock for editing.
+    return toInputDateTime(new Date(raw));
+  }
+  return raw.slice(0, 16);
+}
+
 function ProfileModal({ onClose, onSave, onReset, onSignOut, profile }) {
   const [name, setName] = useState(profile.name);
-  const [birthDate, setBirthDate] = useState(profile.birthDate.slice(0, 16));
+  const [birthDate, setBirthDate] = useState(
+    birthDateToInputValue(profile.birthDate),
+  );
   const [units, setUnits] = useState(profile.units || "imperial");
   const [confirmReset, setConfirmReset] = useState(false);
 
@@ -1527,23 +1734,20 @@ function ProfileModal({ onClose, onSave, onReset, onSignOut, profile }) {
           options={[
             { label: "Imperial", value: "imperial" },
             { label: "Metric", value: "metric" },
+            { label: "Both", value: "both" },
           ]}
         />
         <p className="text-xs mt-1.5" style={{ color: C.inkMuted }}>
           {units === "metric"
             ? "Weights in kg, lengths in cm, volumes in ml."
-            : "Weights in lb/oz, lengths in inches, volumes in oz."}
+            : units === "both"
+              ? "Enter or read either unit — the other fills in automatically."
+              : "Weights in lb/oz, lengths in inches, volumes in oz."}
         </p>
       </Field>
       <div className="mb-6">
         <PrimaryButton
-          onClick={() =>
-            onSave({
-              name: name.trim(),
-              birthDate: new Date(birthDate).toISOString(),
-              units,
-            })
-          }
+          onClick={() => onSave({ name: name.trim(), birthDate, units })}
         >
           Save changes
         </PrimaryButton>
@@ -1735,12 +1939,16 @@ function TodayScreen({
   const lastFeed = lastOf("feed");
   const lastSleep = lastOf("sleep");
   const lastDiaper = lastOf("diaper");
-  const lastPump = lastOf("pump");
 
   const feedCount = dayEvents.filter((e) => e.type === "feed").length;
   const diaperCount = dayEvents.filter((e) => e.type === "diaper").length;
 
   const isToday = isSameDay(selectedDate, now);
+
+  const [selectedRingEvent, setSelectedRingEvent] = useState(null);
+  const handleDotTap = (ev) => {
+    setSelectedRingEvent((cur) => (cur && cur.id === ev.id ? null : ev));
+  };
 
   return (
     <div className="flex-1 overflow-y-auto bd-scroll pb-28">
@@ -1821,9 +2029,10 @@ function TodayScreen({
       {/* date nav */}
       <div className="flex items-center justify-center gap-4 px-5 mt-3 mb-1">
         <button
-          onClick={() =>
-            setSelectedDate(new Date(selectedDate.getTime() - 86400000))
-          }
+          onClick={() => {
+            setSelectedRingEvent(null);
+            setSelectedDate(new Date(selectedDate.getTime() - 86400000));
+          }}
           className="rounded-full p-1.5 cursor-pointer"
           style={{ color: C.inkMuted }}
           aria-label="Previous day"
@@ -1837,10 +2046,12 @@ function TodayScreen({
           {isToday ? "Today" : dateStr(selectedDate)}
         </p>
         <button
-          onClick={() =>
-            !isToday &&
-            setSelectedDate(new Date(selectedDate.getTime() + 86400000))
-          }
+          onClick={() => {
+            if (!isToday) {
+              setSelectedRingEvent(null);
+              setSelectedDate(new Date(selectedDate.getTime() + 86400000));
+            }
+          }}
           className="rounded-full p-1.5"
           style={{
             color: isToday ? C.inkFaint : C.inkMuted,
@@ -1859,65 +2070,115 @@ function TodayScreen({
           events={events}
           now={now}
           activeTimer={activeTimer}
+          onDotTap={handleDotTap}
+          selectedEventId={selectedRingEvent?.id}
         />
       </div>
 
-      <div
-        className="flex flex-wrap justify-center gap-x-4 gap-y-1.5 px-5 mb-4 text-xs"
-        style={{ color: C.inkMuted }}
-      >
-        <span className="flex items-center gap-1.5">
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: 99,
-              background: C.sleep,
-              display: "inline-block",
+      {selectedRingEvent ? (
+        <div
+          className="mx-5 mb-4 rounded-2xl p-3 flex items-center gap-3"
+          style={{
+            background: eventIcon(selectedRingEvent).bg,
+            border: `1px solid ${eventIcon(selectedRingEvent).color}33`,
+          }}
+        >
+          <IconBadge
+            color={eventIcon(selectedRingEvent).color}
+            bg="#ffffffaa"
+            size={32}
+          >
+            {React.createElement(eventIcon(selectedRingEvent).Icon, {
+              size: 15,
+            })}
+          </IconBadge>
+          <div className="flex-1 min-w-0">
+            <p
+              className="text-sm truncate"
+              style={{ color: C.ink, fontWeight: 700 }}
+            >
+              {eventTitle(selectedRingEvent, units)}
+            </p>
+            <p className="text-xs" style={{ color: C.inkMuted }}>
+              {eventSubtitle(selectedRingEvent)}
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              onEdit(selectedRingEvent);
             }}
-          />{" "}
-          sleep
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
+            className="rounded-full flex items-center justify-center cursor-pointer shrink-0"
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: 99,
-              background: C.feed,
-              display: "inline-block",
+              width: 28,
+              height: 28,
+              background: "#ffffffaa",
+              color: C.ink,
             }}
-          />{" "}
-          {feedCount} feeds
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
+            aria-label="Edit"
+          >
+            <Pencil size={13} />
+          </button>
+          <button
+            onClick={() => setSelectedRingEvent(null)}
+            className="rounded-full flex items-center justify-center cursor-pointer shrink-0"
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: 99,
-              background: C.diaperWet,
-              display: "inline-block",
+              width: 28,
+              height: 28,
+              background: "#ffffffaa",
+              color: C.inkMuted,
             }}
-          />{" "}
-          {diaperCount} diapers
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: 99,
-              background: C.pump,
-              display: "inline-block",
-            }}
-          />{" "}
-          pumps
-        </span>
-      </div>
+            aria-label="Dismiss"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      ) : (
+        <div
+          className="flex flex-wrap justify-center gap-x-4 gap-y-1.5 px-5 mb-4 text-xs"
+          style={{ color: C.inkMuted }}
+        >
+          <span className="flex items-center gap-1.5">
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 99,
+                background: C.sleep,
+                display: "inline-block",
+              }}
+            />{" "}
+            sleep
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 99,
+                background: C.feed,
+                display: "inline-block",
+              }}
+            />{" "}
+            {feedCount} feeds
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 99,
+                background: C.diaperWet,
+                display: "inline-block",
+              }}
+            />{" "}
+            {diaperCount} diapers
+          </span>
+          <span style={{ color: C.inkFaint }}>· tap a dot for details</span>
+        </div>
+      )}
 
       {/* quick actions */}
-      <div className="grid grid-cols-5 gap-1.5 px-5 mb-5">
+      <div className="grid grid-cols-4 gap-2 px-5 mb-5">
         {[
           {
             key: "feed",
@@ -1941,13 +2202,6 @@ function TodayScreen({
             bg: C.diaperLight,
           },
           {
-            key: "pump",
-            label: "Pump",
-            Icon: FlaskConical,
-            color: C.pump,
-            bg: C.pumpLight,
-          },
-          {
             key: "journal",
             label: "Journal",
             Icon: NotebookPen,
@@ -1958,12 +2212,12 @@ function TodayScreen({
           <button
             key={a.key}
             onClick={() => onQuickAction(a.key)}
-            className="flex flex-col items-center gap-1 py-2.5 rounded-2xl cursor-pointer transition-transform active:scale-95"
+            className="flex flex-col items-center gap-1.5 py-3 rounded-2xl cursor-pointer transition-transform active:scale-95"
             style={{ background: a.bg }}
           >
-            <a.Icon size={18} color={a.color} />
+            <a.Icon size={20} color={a.color} />
             <span
-              className="text-[10px] leading-tight text-center"
+              className="text-xs"
               style={{ color: a.color, fontWeight: 700 }}
             >
               {a.label}
@@ -1973,26 +2227,25 @@ function TodayScreen({
       </div>
 
       {/* last activity */}
-      <div className="grid grid-cols-4 gap-2 px-5 mb-5">
+      <div className="grid grid-cols-3 gap-2 px-5 mb-5">
         {[
           { ev: lastFeed, label: "Last feed", color: C.feed },
           { ev: lastSleep, label: "Last sleep", color: C.sleep },
           { ev: lastDiaper, label: "Last diaper", color: C.diaper },
-          { ev: lastPump, label: "Last pump", color: C.pump },
         ].map((x, i) => (
           <div
             key={i}
-            className="rounded-2xl p-2.5"
+            className="rounded-2xl p-3"
             style={{ background: C.surface, border: `1px solid ${C.border}` }}
           >
             <p
-              className="text-[10px] mb-1"
+              className="text-[11px] mb-1"
               style={{ color: C.inkMuted, fontWeight: 500 }}
             >
               {x.label}
             </p>
             <p
-              className="text-xs bd-mono"
+              className="text-sm bd-mono"
               style={{ color: x.color, fontWeight: 700 }}
             >
               {x.ev ? timeAgo(new Date(x.ev.timestamp), now) : "—"}
@@ -2168,13 +2421,29 @@ function GrowthScreen({
             ).toFixed(2),
           )
         : null,
+      weightAlt: hasWeight
+        ? Number(
+            (isMetric
+              ? (g.weightLb || 0) + (g.weightOz || 0) / 16
+              : lbOzToKg(g.weightLb, g.weightOz)
+            ).toFixed(2),
+          )
+        : null,
       height:
         g.heightIn != null
           ? Number((isMetric ? inToCm(g.heightIn) : g.heightIn).toFixed(1))
           : null,
+      heightAlt:
+        g.heightIn != null
+          ? Number((isMetric ? g.heightIn : inToCm(g.heightIn)).toFixed(1))
+          : null,
       head:
         g.headIn != null
           ? Number((isMetric ? inToCm(g.headIn) : g.headIn).toFixed(1))
+          : null,
+      headAlt:
+        g.headIn != null
+          ? Number((isMetric ? g.headIn : inToCm(g.headIn)).toFixed(1))
           : null,
     };
   });
@@ -2183,18 +2452,21 @@ function GrowthScreen({
     weight: {
       label: "Weight",
       unit: isMetric ? "kg" : "lb",
+      altUnit: isMetric ? "lb" : "kg",
       color: C.primary,
       key: "weight",
     },
     height: {
       label: "Height",
       unit: isMetric ? "cm" : "in",
+      altUnit: isMetric ? "in" : "cm",
       color: C.feed,
       key: "height",
     },
     head: {
       label: "Head circumference",
       unit: isMetric ? "cm" : "in",
+      altUnit: isMetric ? "in" : "cm",
       color: C.sleep,
       key: "head",
     },
@@ -2278,7 +2550,18 @@ function GrowthScreen({
                     fontSize: 12,
                     fontFamily: "Inter",
                   }}
-                  formatter={(v) => [`${v} ${m.unit}`, m.label]}
+                  formatter={(v, name, item) => {
+                    if (units === "both") {
+                      const alt = item?.payload?.[`${m.key}Alt`];
+                      return [
+                        alt != null
+                          ? `${v} ${m.unit} (${alt} ${m.altUnit})`
+                          : `${v} ${m.unit}`,
+                        m.label,
+                      ];
+                    }
+                    return [`${v} ${m.unit}`, m.label];
+                  }}
                 />
                 <Line
                   type="monotone"
@@ -2386,6 +2669,227 @@ function GrowthRow({ g, onEdit, onDelete, units = "imperial" }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function PumpScreen({
+  events,
+  now,
+  onAdd,
+  onEdit,
+  onDelete,
+  units = "imperial",
+}) {
+  const pumpEvents = events.filter((e) => e.type === "pump");
+  const isMetricPrimary = units === "metric";
+  const unitLabel = isMetricPrimary ? "ml" : "oz";
+  const altUnitLabel = isMetricPrimary ? "oz" : "ml";
+
+  const toDisplay = (totalOz) =>
+    isMetricPrimary ? Math.round(ozToMl(totalOz)) : Number(totalOz.toFixed(1));
+  const toAltDisplay = (totalOz) =>
+    isMetricPrimary ? Number(totalOz.toFixed(1)) : Math.round(ozToMl(totalOz));
+
+  // Last 14 days, oldest first, for the chart.
+  const chartData = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(now);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    const { start, end } = dayBounds(d);
+    const totalOz = pumpEvents
+      .filter((e) => {
+        const t = new Date(e.timestamp);
+        return t >= start && t < end;
+      })
+      .reduce((sum, e) => sum + (e.amount || 0), 0);
+    chartData.push({
+      date: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+      total: totalOz > 0 ? toDisplay(totalOz) : 0,
+      totalAlt: totalOz > 0 ? toAltDisplay(totalOz) : 0,
+    });
+  }
+  const hasChartData = chartData.some((d) => d.total > 0);
+
+  const { start: todayStart, end: todayEnd } = dayBounds(now);
+  const todayEvents = pumpEvents.filter((e) => {
+    const t = new Date(e.timestamp);
+    return t >= todayStart && t < todayEnd;
+  });
+  const todayTotalOz = todayEvents.reduce((sum, e) => sum + (e.amount || 0), 0);
+
+  const sorted = [...pumpEvents].sort(
+    (a, b) => new Date(b.timestamp) - new Date(a.timestamp),
+  );
+  const groups = [];
+  let curKey = null;
+  sorted.forEach((ev) => {
+    const d = new Date(ev.timestamp);
+    const key = d.toDateString();
+    if (key !== curKey) {
+      groups.push({ key, label: dateStr(d), items: [] });
+      curKey = key;
+    }
+    groups[groups.length - 1].items.push(ev);
+  });
+
+  return (
+    <div className="flex-1 overflow-y-auto bd-scroll pb-28">
+      <div className="px-5 pt-6 pb-3 flex items-center justify-between">
+        <h1
+          className="bd-display text-2xl"
+          style={{ color: C.ink, fontWeight: 600 }}
+        >
+          Pump
+        </h1>
+        <button
+          onClick={onAdd}
+          className="rounded-full flex items-center justify-center cursor-pointer"
+          style={{ width: 38, height: 38, background: C.pump, color: "#fff" }}
+          aria-label="Log a pump session"
+        >
+          <Plus size={19} />
+        </button>
+      </div>
+
+      <div className="flex gap-2 px-5 mb-4">
+        <div
+          className="flex-1 rounded-2xl p-3"
+          style={{ background: C.pumpLight, border: `1px solid ${C.pump}33` }}
+        >
+          <p
+            className="text-[11px] mb-1"
+            style={{ color: C.pump, fontWeight: 600 }}
+          >
+            Today's total
+          </p>
+          <p
+            className="text-lg bd-mono"
+            style={{ color: C.pump, fontWeight: 700 }}
+          >
+            {fmtVolume(todayTotalOz, units)}
+          </p>
+        </div>
+        <div
+          className="flex-1 rounded-2xl p-3"
+          style={{ background: C.surface, border: `1px solid ${C.border}` }}
+        >
+          <p
+            className="text-[11px] mb-1"
+            style={{ color: C.inkMuted, fontWeight: 600 }}
+          >
+            Sessions today
+          </p>
+          <p
+            className="text-lg bd-mono"
+            style={{ color: C.ink, fontWeight: 700 }}
+          >
+            {todayEvents.length}
+          </p>
+        </div>
+      </div>
+
+      <div
+        className="mx-5 rounded-2xl p-4 mb-5"
+        style={{ background: C.surface, border: `1px solid ${C.border}` }}
+      >
+        {hasChartData ? (
+          <div style={{ width: "100%", height: 180 }}>
+            <ResponsiveContainer>
+              <BarChart
+                data={chartData}
+                margin={{ top: 8, right: 8, left: -18, bottom: 0 }}
+              >
+                <CartesianGrid stroke={C.border} vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 9, fill: C.inkMuted }}
+                  axisLine={{ stroke: C.border }}
+                  tickLine={false}
+                  interval={2}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: C.inkMuted }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={34}
+                />
+                <Tooltip
+                  contentStyle={{
+                    borderRadius: 12,
+                    border: `1px solid ${C.border}`,
+                    fontSize: 12,
+                    fontFamily: "Inter",
+                  }}
+                  formatter={(v, name, item) => {
+                    if (units === "both") {
+                      const alt = item?.payload?.totalAlt;
+                      return [
+                        `${v} ${unitLabel} (${alt} ${altUnitLabel})`,
+                        "Pumped",
+                      ];
+                    }
+                    return [`${v} ${unitLabel}`, "Pumped"];
+                  }}
+                />
+                <Bar
+                  dataKey="total"
+                  fill={C.pump}
+                  radius={[5, 5, 0, 0]}
+                  maxBarSize={18}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="py-10 text-center">
+            <p className="text-sm" style={{ color: C.inkMuted }}>
+              Log a pump session to see your 14-day trend.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="px-5">
+        <p className="text-sm mb-2" style={{ color: C.ink, fontWeight: 700 }}>
+          All sessions
+        </p>
+        {groups.length === 0 && (
+          <div
+            className="rounded-2xl p-8 text-center"
+            style={{ background: C.surface, border: `1px dashed ${C.border}` }}
+          >
+            <p className="text-sm" style={{ color: C.inkMuted }}>
+              No pump sessions logged yet.
+            </p>
+          </div>
+        )}
+        {groups.map((g) => (
+          <div key={g.key} className="mb-5">
+            <p
+              className="text-xs mb-2"
+              style={{
+                color: C.inkFaint,
+                fontWeight: 700,
+                textTransform: "uppercase",
+                letterSpacing: 0.4,
+              }}
+            >
+              {g.label}
+            </p>
+            {g.items.map((ev) => (
+              <EventRow
+                key={ev.id}
+                ev={ev}
+                onEdit={onEdit}
+                onDelete={onDelete}
+                units={units}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2546,6 +3050,7 @@ function BottomNav({ tab, setTab }) {
   const items = [
     { key: "today", label: "Today", Icon: Sun },
     { key: "log", label: "Log", Icon: ListChecks },
+    { key: "pump", label: "Pump", Icon: FlaskConical },
     { key: "growth", label: "Growth", Icon: TrendingUp },
     { key: "journal", label: "Journal", Icon: NotebookPen },
   ];
@@ -2788,6 +3293,16 @@ export default function App({ onSignOut } = {}) {
             onEdit={handleEditEvent}
             onDelete={handleDeleteEvent}
             onAdd={() => setModal({ kind: "feed" })}
+            units={units}
+          />
+        )}
+        {tab === "pump" && (
+          <PumpScreen
+            events={events}
+            now={now}
+            onAdd={() => setModal({ kind: "pump" })}
+            onEdit={(ev) => setModal({ kind: "pump", editing: ev })}
+            onDelete={handleDeleteEvent}
             units={units}
           />
         )}
