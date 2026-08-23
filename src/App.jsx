@@ -39,6 +39,7 @@ import {
   ResponsiveContainer,
   Dot,
 } from "recharts";
+import { subscribeAll } from "./storage-polyfill.js";
 
 /* ------------------------------------------------------------------ */
 /* Design tokens                                                       */
@@ -120,9 +121,15 @@ function mlToOz(ml) {
   return Number(ml || 0) / FLOZ_TO_ML;
 }
 
+// Rounds to 2 decimal places and strips floating-point artifacts like
+// 1.8 + 1.35 === 3.1500000000000004.
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 function fmtWeight(lb, oz, units) {
   if (lb == null && oz == null) return null;
-  const imperial = `${lb || 0} lb ${oz || 0} oz`;
+  const imperial = `${round2(lb || 0)} lb ${round2(oz || 0)} oz`;
   const metric = `${lbOzToKg(lb, oz).toFixed(2)} kg`;
   if (units === "metric") return metric;
   if (units === "both") return `${imperial} (${metric})`;
@@ -130,7 +137,7 @@ function fmtWeight(lb, oz, units) {
 }
 function fmtLength(inches, units, label) {
   if (inches == null) return null;
-  const imperial = `${inches} in`;
+  const imperial = `${round2(inches)} in`;
   const metric = `${inToCm(inches).toFixed(1)} cm`;
   const suffix = label ? " " + label : "";
   if (units === "metric") return metric + suffix;
@@ -139,7 +146,7 @@ function fmtLength(inches, units, label) {
 }
 function fmtVolume(oz, units) {
   if (oz == null) return null;
-  const imperial = `${oz} oz`;
+  const imperial = `${round2(oz)} oz`;
   const metric = `${Math.round(ozToMl(oz))} ml`;
   if (units === "metric") return metric;
   if (units === "both") return `${imperial} (${metric})`;
@@ -2288,8 +2295,12 @@ function TodayScreen({
 
 function LogScreen({ events, now, onEdit, onDelete, onAdd, units }) {
   const [filter, setFilter] = useState("all");
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  // Pump sessions have their own tab now, so Log only covers feed/sleep/diaper.
+  const logEvents = events.filter((e) => e.type !== "pump");
   const filtered =
-    filter === "all" ? events : events.filter((e) => e.type === filter);
+    filter === "all" ? logEvents : logEvents.filter((e) => e.type === filter);
   const sorted = [...filtered].sort(
     (a, b) => new Date(b.timestamp) - new Date(a.timestamp),
   );
@@ -2306,6 +2317,24 @@ function LogScreen({ events, now, onEdit, onDelete, onAdd, units }) {
     groups[groups.length - 1].items.push(ev);
   });
 
+  const addOptions = [
+    { key: "feed", label: "Feed", Icon: Milk, color: C.feed, bg: C.feedLight },
+    {
+      key: "sleep",
+      label: "Sleep",
+      Icon: Moon,
+      color: C.sleep,
+      bg: C.sleepLight,
+    },
+    {
+      key: "diaper",
+      label: "Diaper",
+      Icon: Droplets,
+      color: C.diaper,
+      bg: C.diaperLight,
+    },
+  ];
+
   return (
     <div className="flex-1 overflow-y-auto bd-scroll pb-28">
       <div className="px-5 pt-6 pb-3 flex items-center justify-between">
@@ -2316,7 +2345,7 @@ function LogScreen({ events, now, onEdit, onDelete, onAdd, units }) {
           Log
         </h1>
         <button
-          onClick={onAdd}
+          onClick={() => setPickerOpen(true)}
           className="rounded-full flex items-center justify-center cursor-pointer"
           style={{
             width: 38,
@@ -2335,7 +2364,6 @@ function LogScreen({ events, now, onEdit, onDelete, onAdd, units }) {
           { key: "feed", label: "Feeds" },
           { key: "sleep", label: "Sleep" },
           { key: "diaper", label: "Diapers" },
-          { key: "pump", label: "Pumps" },
         ].map((f) => (
           <button
             key={f.key}
@@ -2388,6 +2416,32 @@ function LogScreen({ events, now, onEdit, onDelete, onAdd, units }) {
           </div>
         ))}
       </div>
+
+      {pickerOpen && (
+        <Sheet title="Add entry" onClose={() => setPickerOpen(false)}>
+          <div className="grid grid-cols-3 gap-2">
+            {addOptions.map((o) => (
+              <button
+                key={o.key}
+                onClick={() => {
+                  setPickerOpen(false);
+                  onAdd(o.key);
+                }}
+                className="flex flex-col items-center gap-1.5 py-4 rounded-2xl cursor-pointer transition-transform active:scale-95"
+                style={{ background: o.bg }}
+              >
+                <o.Icon size={20} color={o.color} />
+                <span
+                  className="text-xs"
+                  style={{ color: o.color, fontWeight: 700 }}
+                >
+                  {o.label}
+                </span>
+              </button>
+            ))}
+          </div>
+        </Sheet>
+      )}
     </div>
   );
 }
@@ -2528,7 +2582,7 @@ function GrowthScreen({
             <ResponsiveContainer>
               <LineChart
                 data={chartData}
-                margin={{ top: 8, right: 12, left: -18, bottom: 0 }}
+                margin={{ top: 8, right: 12, left: -6, bottom: 0 }}
               >
                 <CartesianGrid stroke={C.border} vertical={false} />
                 <XAxis
@@ -2541,7 +2595,10 @@ function GrowthScreen({
                   tick={{ fontSize: 10, fill: C.inkMuted }}
                   axisLine={false}
                   tickLine={false}
-                  width={34}
+                  width={44}
+                  tickFormatter={(v) =>
+                    Number.isInteger(v) ? String(v) : v.toFixed(1)
+                  }
                 />
                 <Tooltip
                   contentStyle={{
@@ -2698,12 +2755,14 @@ function PumpScreen({
     d.setHours(0, 0, 0, 0);
     d.setDate(d.getDate() - i);
     const { start, end } = dayBounds(d);
-    const totalOz = pumpEvents
-      .filter((e) => {
-        const t = new Date(e.timestamp);
-        return t >= start && t < end;
-      })
-      .reduce((sum, e) => sum + (e.amount || 0), 0);
+    const totalOz = round2(
+      pumpEvents
+        .filter((e) => {
+          const t = new Date(e.timestamp);
+          return t >= start && t < end;
+        })
+        .reduce((sum, e) => sum + (e.amount || 0), 0),
+    );
     chartData.push({
       date: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
       total: totalOz > 0 ? toDisplay(totalOz) : 0,
@@ -2717,7 +2776,9 @@ function PumpScreen({
     const t = new Date(e.timestamp);
     return t >= todayStart && t < todayEnd;
   });
-  const todayTotalOz = todayEvents.reduce((sum, e) => sum + (e.amount || 0), 0);
+  const todayTotalOz = round2(
+    todayEvents.reduce((sum, e) => sum + (e.amount || 0), 0),
+  );
 
   const sorted = [...pumpEvents].sort(
     (a, b) => new Date(b.timestamp) - new Date(a.timestamp),
@@ -2799,7 +2860,7 @@ function PumpScreen({
             <ResponsiveContainer>
               <BarChart
                 data={chartData}
-                margin={{ top: 8, right: 8, left: -18, bottom: 0 }}
+                margin={{ top: 8, right: 8, left: -6, bottom: 0 }}
               >
                 <CartesianGrid stroke={C.border} vertical={false} />
                 <XAxis
@@ -2813,7 +2874,10 @@ function PumpScreen({
                   tick={{ fontSize: 10, fill: C.inkMuted }}
                   axisLine={false}
                   tickLine={false}
-                  width={34}
+                  width={44}
+                  tickFormatter={(v) =>
+                    Number.isInteger(v) ? String(v) : v.toFixed(1)
+                  }
                 />
                 <Tooltip
                   contentStyle={{
@@ -3090,7 +3154,7 @@ function BottomNav({ tab, setTab }) {
 /* ------------------------------------------------------------------ */
 /* App                                                                   */
 /* ------------------------------------------------------------------ */
-export default function App({ onSignOut } = {}) {
+export default function App({ userId, onSignOut } = {}) {
   const [loaded, setLoaded] = useState(false);
   const [profile, setProfile] = useState(null);
   const [events, setEvents] = useState([]);
@@ -3109,13 +3173,31 @@ export default function App({ onSignOut } = {}) {
   // until they explicitly switch it in Settings.
   const units = profile?.units || "imperial";
 
+  const reloadProfileAndTimer = useCallback(async () => {
+    const [p, tm] = await Promise.all([
+      loadKey("profile", null),
+      loadKey("active-timer", null),
+    ]);
+    setProfile(p);
+    setActiveTimer(tm);
+  }, []);
+  const reloadEvents = useCallback(async () => {
+    setEvents(await window.storage.eventsApi.list());
+  }, []);
+  const reloadGrowth = useCallback(async () => {
+    setGrowth(await window.storage.growthApi.list());
+  }, []);
+  const reloadJournal = useCallback(async () => {
+    setJournal(await window.storage.journalApi.list());
+  }, []);
+
   useEffect(() => {
     (async () => {
       const [p, ev, gr, jr, tm] = await Promise.all([
         loadKey("profile", null),
-        loadKey("events", []),
-        loadKey("growth", []),
-        loadKey("journal", []),
+        window.storage.eventsApi.list(),
+        window.storage.growthApi.list(),
+        window.storage.journalApi.list(),
         loadKey("active-timer", null),
       ]);
       setProfile(p);
@@ -3127,6 +3209,25 @@ export default function App({ onSignOut } = {}) {
     })();
   }, []);
 
+  // Realtime: a change from another device only refetches the specific
+  // list that changed, instead of remounting the whole app.
+  useEffect(() => {
+    if (!userId) return;
+    const unsubscribe = subscribeAll(userId, {
+      onKvChange: reloadProfileAndTimer,
+      onEventsChange: reloadEvents,
+      onGrowthChange: reloadGrowth,
+      onJournalChange: reloadJournal,
+    });
+    return unsubscribe;
+  }, [
+    userId,
+    reloadProfileAndTimer,
+    reloadEvents,
+    reloadGrowth,
+    reloadJournal,
+  ]);
+
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000 * 15);
     return () => clearInterval(t);
@@ -3135,18 +3236,6 @@ export default function App({ onSignOut } = {}) {
   const saveProfile = async (p) => {
     setProfile(p);
     await saveKey("profile", p);
-  };
-  const saveEvents = async (list) => {
-    setEvents(list);
-    await saveKey("events", list);
-  };
-  const saveGrowth = async (list) => {
-    setGrowth(list);
-    await saveKey("growth", list);
-  };
-  const saveJournal = async (list) => {
-    setJournal(list);
-    await saveKey("journal", list);
   };
   const saveTimer = async (t) => {
     setActiveTimer(t);
@@ -3192,54 +3281,62 @@ export default function App({ onSignOut } = {}) {
     if (!activeTimer) return;
     const startedAt = new Date(activeTimer.startedAt);
     const end = new Date();
-    if (activeTimer.type === "sleep") {
-      const ev = {
-        id: uid(),
-        type: "sleep",
-        timestamp: startedAt.toISOString(),
-        endTimestamp: end.toISOString(),
-        durationMs: end - startedAt,
-        note: "",
-      };
-      await saveEvents([...events, ev]);
-    } else {
-      const ev = {
-        id: uid(),
-        type: "feed",
-        timestamp: startedAt.toISOString(),
-        method: "breast",
-        side: activeTimer.side,
-        durationMs: end - startedAt,
-        note: "",
-      };
-      await saveEvents([...events, ev]);
-    }
+    const ev =
+      activeTimer.type === "sleep"
+        ? {
+            id: uid(),
+            type: "sleep",
+            timestamp: startedAt.toISOString(),
+            endTimestamp: end.toISOString(),
+            durationMs: end - startedAt,
+            note: "",
+          }
+        : {
+            id: uid(),
+            type: "feed",
+            timestamp: startedAt.toISOString(),
+            method: "breast",
+            side: activeTimer.side,
+            durationMs: end - startedAt,
+            note: "",
+          };
+    setEvents((prev) => [...prev, ev]);
+    await window.storage.eventsApi.put(ev);
     await saveTimer(null);
   };
 
+  // Each of these updates local state immediately (so the UI feels
+  // instant) and persists only the single changed row — never the whole
+  // collection — so a failed or slow request can't ever wipe history.
   const handleSaveEvent = async (ev) => {
-    await saveEvents(upsert(events, ev));
+    setEvents((prev) => upsert(prev, ev));
     setModal(null);
+    await window.storage.eventsApi.put(ev);
   };
   const handleDeleteEvent = async (id) => {
-    await saveEvents(events.filter((e) => e.id !== id));
+    setEvents((prev) => prev.filter((e) => e.id !== id));
+    await window.storage.eventsApi.remove(id);
   };
   const handleEditEvent = (ev) => setModal({ kind: ev.type, editing: ev });
 
   const handleSaveGrowth = async (g) => {
-    await saveGrowth(upsert(growth, g));
+    setGrowth((prev) => upsert(prev, g));
     setModal(null);
+    await window.storage.growthApi.put(g);
   };
   const handleDeleteGrowth = async (id) => {
-    await saveGrowth(growth.filter((g) => g.id !== id));
+    setGrowth((prev) => prev.filter((g) => g.id !== id));
+    await window.storage.growthApi.remove(id);
   };
 
   const handleSaveJournal = async (j) => {
-    await saveJournal(upsert(journal, j));
+    setJournal((prev) => upsert(prev, j));
     setModal(null);
+    await window.storage.journalApi.put(j);
   };
   const handleDeleteJournal = async (id) => {
-    await saveJournal(journal.filter((j) => j.id !== id));
+    setJournal((prev) => prev.filter((j) => j.id !== id));
+    await window.storage.journalApi.remove(id);
   };
 
   if (!loaded) {
@@ -3292,7 +3389,7 @@ export default function App({ onSignOut } = {}) {
             now={now}
             onEdit={handleEditEvent}
             onDelete={handleDeleteEvent}
-            onAdd={() => setModal({ kind: "feed" })}
+            onAdd={(type) => setModal({ kind: type })}
             units={units}
           />
         )}
@@ -3384,9 +3481,18 @@ export default function App({ onSignOut } = {}) {
               setModal(null);
             }}
             onReset={async () => {
-              await saveEvents([]);
-              await saveGrowth([]);
-              await saveJournal([]);
+              await Promise.all(
+                events.map((e) => window.storage.eventsApi.remove(e.id)),
+              );
+              await Promise.all(
+                growth.map((g) => window.storage.growthApi.remove(g.id)),
+              );
+              await Promise.all(
+                journal.map((j) => window.storage.journalApi.remove(j.id)),
+              );
+              setEvents([]);
+              setGrowth([]);
+              setJournal([]);
               await saveTimer(null);
               setModal(null);
             }}
